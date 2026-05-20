@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const cron = require("node-cron");
 const ZKLib = require("node-zklib");
-const sql = require("mssql");
+const { Pool } = require("pg");
 const dotenv = require("dotenv");
 
 dotenv.config();
@@ -23,28 +23,27 @@ function safe(value, defaultValue = null) {
 }
 
 // ======================================================
-// DATABASE CONFIG
+// POSTGRESQL CONNECTION
 // ======================================================
-const dbConfig = {
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER,
-  database: process.env.DB_DATABASE || "km_fitness_club",
-  port: parseInt(process.env.DB_PORT || "1433"),
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
 
-  options: {
-    encrypt: false,
-    trustServerCertificate: true,
+  ssl: {
+    rejectUnauthorized: false,
   },
-};
-
-let pool;
+});
 
 async function connectDB() {
   try {
-    pool = await sql.connect(dbConfig);
-    console.log("✅ SQL Connected");
+
+    const client = await pool.connect();
+
+    console.log("✅ PostgreSQL Connected");
+
+    client.release();
+
   } catch (err) {
+
     console.log("❌ DB Error:", err.message);
   }
 }
@@ -53,13 +52,18 @@ async function connectDB() {
 // BIOMETRIC CONFIG
 // ======================================================
 const DEVICE_IP = process.env.DEVICE_IP || "192.168.0.201";
-const DEVICE_PORT = parseInt(process.env.DEVICE_PORT || "4370");
+
+const DEVICE_PORT = parseInt(
+  process.env.DEVICE_PORT || "4370"
+);
 
 // ======================================================
 // CONNECT DEVICE
 // ======================================================
 async function connectDevice() {
+
   try {
+
     const zk = new ZKLib(
       DEVICE_IP,
       DEVICE_PORT,
@@ -85,6 +89,7 @@ async function connectDevice() {
 // GET ALL DEVICE USERS
 // ======================================================
 async function getAllDeviceUsers(zk) {
+
   try {
 
     const users = await zk.getUsers();
@@ -103,6 +108,7 @@ async function getAllDeviceUsers(zk) {
 // REMOVE USER FROM DEVICE
 // ======================================================
 async function removeUserFromDevice(zk, userId) {
+
   try {
 
     const uid = parseInt(userId);
@@ -118,16 +124,11 @@ async function removeUserFromDevice(zk, userId) {
 
     if (!foundUser) {
 
-      console.log(`⚠️ User Not Found In Device: ${userId}`);
+      console.log(`⚠️ User Not Found: ${userId}`);
 
       return false;
     }
 
-    console.log("📌 Found Device User:", foundUser);
-
-    // ==================================================
-    // METHOD 1 - deleteUser
-    // ==================================================
     if (typeof zk.deleteUser === "function") {
 
       try {
@@ -144,17 +145,16 @@ async function removeUserFromDevice(zk, userId) {
       }
     }
 
-    // ==================================================
-    // METHOD 2 - SSR_DeleteEnrollData
-    // ==================================================
     if (typeof zk.executeCmd === "function") {
 
       try {
 
-        // COMMAND 18 = DELETE USER
-        await zk.executeCmd(18, Buffer.from([foundUser.uid]));
+        await zk.executeCmd(
+          18,
+          Buffer.from([foundUser.uid])
+        );
 
-        console.log(`🚫 USER REMOVED USING COMMAND: ${userId}`);
+        console.log(`🚫 USER REMOVED: ${userId}`);
 
         return true;
 
@@ -164,9 +164,6 @@ async function removeUserFromDevice(zk, userId) {
       }
     }
 
-    // ==================================================
-    // METHOD 3 - OVERWRITE USER
-    // ==================================================
     if (typeof zk.setUser === "function") {
 
       try {
@@ -179,46 +176,38 @@ async function removeUserFromDevice(zk, userId) {
           0
         );
 
-        console.log(`🚫 USER OVERWRITTEN: ${userId}`);
+        console.log(`🚫 USER BLOCKED: ${userId}`);
 
         return true;
 
       } catch (e) {
 
-        console.log("setUser fallback failed:", e.message);
+        console.log("setUser failed:", e.message);
       }
     }
-
-    console.log("⚠️ No working remove method");
 
     return false;
 
   } catch (err) {
 
-    console.log("❌ Remove User Error:", err.message);
+    console.log("❌ Remove Error:", err.message);
 
     return false;
   }
 }
 
 // ======================================================
-// ENABLE USER IN DEVICE
+// ENABLE USER
 // ======================================================
 async function enableUserInDevice(
   zk,
   userId,
   fullName
 ) {
+
   try {
 
     const uid = parseInt(userId);
-
-    if (typeof zk.setUser !== "function") {
-
-      console.log("❌ setUser method not found");
-
-      return false;
-    }
 
     await zk.setUser(
       uid,
@@ -234,7 +223,7 @@ async function enableUserInDevice(
 
   } catch (err) {
 
-    console.log("❌ Enable User Error:", err.message);
+    console.log("❌ Enable Error:", err.message);
 
     return false;
   }
@@ -244,9 +233,10 @@ async function enableUserInDevice(
 // GET MEMBERS
 // ======================================================
 app.get("/api/members", async (req, res) => {
+
   try {
 
-    const result = await pool.request().query(`
+    const result = await pool.query(`
       SELECT
         member_id,
         member_id as id,
@@ -260,9 +250,9 @@ app.get("/api/members", async (req, res) => {
         start_date,
         expiry_date,
 
-        ISNULL(total_fee,0) as total_fee,
-        ISNULL(paid_amount,0) as paid_amount,
-        ISNULL(remaining_amount,0) as remaining_amount,
+        COALESCE(total_fee,0) as total_fee,
+        COALESCE(paid_amount,0) as paid_amount,
+        COALESCE(remaining_amount,0) as remaining_amount,
 
         payment_method,
         payment_status,
@@ -271,12 +261,13 @@ app.get("/api/members", async (req, res) => {
         updated_at
 
       FROM members
+
       ORDER BY member_id DESC
     `);
 
     res.json({
       success: true,
-      data: result.recordset || [],
+      data: result.rows,
     });
 
   } catch (err) {
@@ -292,6 +283,7 @@ app.get("/api/members", async (req, res) => {
 // ADD MEMBER
 // ======================================================
 app.post("/api/members", async (req, res) => {
+
   try {
 
     const {
@@ -309,10 +301,10 @@ app.post("/api/members", async (req, res) => {
     } = req.body;
 
     const safeTotalFee = Number(total_fee || 0);
-    const safePaidAmount = Number(paid_amount || 0);
 
-    const remainingAmount =
-      safeTotalFee - safePaidAmount;
+    const safePaidAmount = Number(
+      paid_amount || 0
+    );
 
     let paymentStatus = "Pending";
 
@@ -322,60 +314,44 @@ app.post("/api/members", async (req, res) => {
       paymentStatus = "Partial";
     }
 
-    await pool.request()
+    await pool.query(
+      `
+      INSERT INTO members (
+        user_id,
+        full_name,
+        phone,
+        email,
+        address,
+        membership_type,
+        start_date,
+        expiry_date,
+        total_fee,
+        paid_amount,
+        payment_method,
+        payment_status
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,
+        $6,$7,$8,$9,$10,
+        $11,$12
+      )
+      `,
+      [
+        safe(user_id),
+        safe(full_name, "Unknown"),
+        safe(phone, ""),
+        safe(email, ""),
+        safe(address, ""),
+        safe(membership_type, "Normal"),
+        safe(start_date, new Date()),
+        safe(expiry_date, new Date()),
+        safeTotalFee,
+        safePaidAmount,
+        safe(payment_method, "Cash"),
+        paymentStatus,
+      ]
+    );
 
-      .input("user_id", sql.VarChar(50), safe(user_id))
-      .input("full_name", sql.VarChar(150), safe(full_name, "Unknown"))
-      .input("phone", sql.VarChar(20), safe(phone, ""))
-      .input("email", sql.VarChar(100), safe(email, ""))
-      .input("address", sql.VarChar(300), safe(address, ""))
-
-      .input("membership_type", sql.VarChar(50), safe(membership_type, "Normal"))
-
-      .input("start_date", sql.Date, safe(start_date, new Date()))
-      .input("expiry_date", sql.Date, safe(expiry_date, new Date()))
-
-      .input("total_fee", sql.Decimal(10,2), safeTotalFee)
-      .input("paid_amount", sql.Decimal(10,2), safePaidAmount)
-      .input("remaining_amount", sql.Decimal(10,2), remainingAmount)
-
-      .input("payment_method", sql.VarChar(50), safe(payment_method, "Cash"))
-      .input("payment_status", sql.VarChar(50), paymentStatus)
-
-      .query(`
-        INSERT INTO members (
-          user_id,
-          full_name,
-          phone,
-          email,
-          address,
-          membership_type,
-          start_date,
-          expiry_date,
-          total_fee,
-          paid_amount,
-          remaining_amount,
-          payment_method,
-          payment_status
-        )
-        VALUES (
-          @user_id,
-          @full_name,
-          @phone,
-          @email,
-          @address,
-          @membership_type,
-          @start_date,
-          @expiry_date,
-          @total_fee,
-          @paid_amount,
-          @remaining_amount,
-          @payment_method,
-          @payment_status
-        )
-      `);
-
-    // ENABLE DEVICE ACCESS
     const zk = await connectDevice();
 
     if (zk) {
@@ -409,6 +385,7 @@ app.post("/api/members", async (req, res) => {
 // UPDATE MEMBER
 // ======================================================
 app.put("/api/members/:id", async (req, res) => {
+
   try {
 
     const id = req.params.id;
@@ -427,12 +404,13 @@ app.put("/api/members/:id", async (req, res) => {
     } = req.body;
 
     const safeTotalFee = Number(total_fee || 0);
-    const safePaidAmount = Number(paid_amount || 0);
 
-    const remainingAmount =
-      safeTotalFee - safePaidAmount;
+    const safePaidAmount = Number(
+      paid_amount || 0
+    );
 
     const today = new Date();
+
     const expiry = new Date(expiry_date);
 
     let finalStatus = "Pending";
@@ -447,16 +425,16 @@ app.put("/api/members/:id", async (req, res) => {
       finalStatus = "Active";
     }
 
-    // GET MEMBER
-    const memberResult = await pool.request()
-      .input("id", sql.Int, id)
-      .query(`
-        SELECT *
-        FROM members
-        WHERE member_id = @id
-      `);
+    const memberResult = await pool.query(
+      `
+      SELECT *
+      FROM members
+      WHERE member_id = $1
+      `,
+      [id]
+    );
 
-    if (memberResult.recordset.length === 0) {
+    if (memberResult.rows.length === 0) {
 
       return res.status(404).json({
         success: false,
@@ -464,50 +442,42 @@ app.put("/api/members/:id", async (req, res) => {
       });
     }
 
-    const member = memberResult.recordset[0];
+    const member = memberResult.rows[0];
 
-    // UPDATE DATABASE
-    await pool.request()
+    await pool.query(
+      `
+      UPDATE members
+      SET
+        full_name = $1,
+        phone = $2,
+        email = $3,
+        address = $4,
+        membership_type = $5,
+        start_date = $6,
+        expiry_date = $7,
+        total_fee = $8,
+        paid_amount = $9,
+        payment_method = $10,
+        payment_status = $11,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE member_id = $12
+      `,
+      [
+        safe(full_name),
+        safe(phone),
+        safe(email),
+        safe(address),
+        safe(membership_type),
+        safe(start_date),
+        safe(expiry_date),
+        safeTotalFee,
+        safePaidAmount,
+        safe(payment_method),
+        finalStatus,
+        id,
+      ]
+    );
 
-      .input("id", sql.Int, id)
-
-      .input("full_name", sql.VarChar(150), safe(full_name, "Unknown"))
-      .input("phone", sql.VarChar(20), safe(phone, ""))
-      .input("email", sql.VarChar(100), safe(email, ""))
-      .input("address", sql.VarChar(300), safe(address, ""))
-
-      .input("membership_type", sql.VarChar(50), safe(membership_type, "Normal"))
-
-      .input("start_date", sql.Date, safe(start_date, new Date()))
-      .input("expiry_date", sql.Date, safe(expiry_date, new Date()))
-
-      .input("total_fee", sql.Decimal(10,2), safeTotalFee)
-      .input("paid_amount", sql.Decimal(10,2), safePaidAmount)
-      .input("remaining_amount", sql.Decimal(10,2), remainingAmount)
-
-      .input("payment_method", sql.VarChar(50), safe(payment_method, "Cash"))
-      .input("payment_status", sql.VarChar(50), finalStatus)
-
-      .query(`
-        UPDATE members
-        SET
-          full_name = @full_name,
-          phone = @phone,
-          email = @email,
-          address = @address,
-          membership_type = @membership_type,
-          start_date = @start_date,
-          expiry_date = @expiry_date,
-          total_fee = @total_fee,
-          paid_amount = @paid_amount,
-          remaining_amount = @remaining_amount,
-          payment_method = @payment_method,
-          payment_status = @payment_status,
-          updated_at = GETDATE()
-        WHERE member_id = @id
-      `);
-
-    // DEVICE CONTROL
     const zk = await connectDevice();
 
     if (zk) {
@@ -519,8 +489,6 @@ app.put("/api/members/:id", async (req, res) => {
           member.user_id
         );
 
-        console.log(`🔴 ACCESS BLOCKED: ${member.full_name}`);
-
       } else {
 
         await enableUserInDevice(
@@ -528,8 +496,6 @@ app.put("/api/members/:id", async (req, res) => {
           member.user_id,
           full_name || member.full_name
         );
-
-        console.log(`🟢 ACCESS ALLOWED: ${member.full_name}`);
       }
 
       await zk.disconnect();
@@ -553,23 +519,22 @@ app.put("/api/members/:id", async (req, res) => {
 });
 
 // ======================================================
-// AUTO CHECK EXPIRED MEMBERS
+// CHECK EXPIRED MEMBERS
 // ======================================================
 async function checkExpiredMembers() {
+
   try {
 
-    console.log("\n🔄 Checking expired members...");
+    console.log("🔄 Checking Expired Members");
 
-    const expired = await pool.request().query(`
+    const expired = await pool.query(`
       SELECT *
       FROM members
-      WHERE expiry_date < CAST(GETDATE() AS DATE)
+      WHERE expiry_date < CURRENT_DATE
       AND payment_status != 'Expired'
     `);
 
-    const list = expired.recordset || [];
-
-    console.log(`📥 Expired Members Found: ${list.length}`);
+    const list = expired.rows;
 
     if (list.length === 0) return;
 
@@ -577,31 +542,25 @@ async function checkExpiredMembers() {
 
     for (const member of list) {
 
-      try {
+      await pool.query(
+        `
+        UPDATE members
+        SET payment_status = 'Expired'
+        WHERE member_id = $1
+        `,
+        [member.member_id]
+      );
 
-        await pool.request()
-          .input("id", sql.Int, member.member_id)
-          .query(`
-            UPDATE members
-            SET payment_status = 'Expired'
-            WHERE member_id = @id
-          `);
+      console.log(
+        `🔴 Expired: ${member.full_name}`
+      );
 
-        console.log(`🔴 Marked Expired: ${member.full_name}`);
+      if (zk) {
 
-        if (zk) {
-
-          await removeUserFromDevice(
-            zk,
-            member.user_id
-          );
-
-          console.log(`🚫 ACCESS REMOVED: ${member.full_name}`);
-        }
-
-      } catch (e) {
-
-        console.log("⚠️ Expiry Error:", e.message);
+        await removeUserFromDevice(
+          zk,
+          member.user_id
+        );
       }
     }
 
@@ -611,7 +570,7 @@ async function checkExpiredMembers() {
 
   } catch (err) {
 
-    console.log("❌ Expiry Cron Error:", err.message);
+    console.log("❌ Expiry Error:", err.message);
   }
 }
 
@@ -619,17 +578,21 @@ async function checkExpiredMembers() {
 // ATTENDANCE SYNC
 // ======================================================
 async function syncAttendance() {
+
   try {
 
     const zk = await connectDevice();
 
     if (!zk) return;
 
-    const attendances = await zk.getAttendances();
+    const attendances =
+      await zk.getAttendances();
 
     const logs = attendances?.data || [];
 
-    console.log(`📥 Attendance found: ${logs.length}`);
+    console.log(
+      `📥 Attendance Found: ${logs.length}`
+    );
 
     for (const log of logs) {
 
@@ -639,38 +602,36 @@ async function syncAttendance() {
 
         if (!userId) continue;
 
-        const exists = await pool.request()
-          .input("user_id", sql.VarChar(50), userId)
-          .input("punch_time", sql.DateTime, log.timestamp)
-          .query(`
-            SELECT attendance_id
-            FROM attendance_logs
-            WHERE user_id = @user_id
-            AND punch_time = @punch_time
-          `);
+        const exists = await pool.query(
+          `
+          SELECT attendance_id
+          FROM attendance_logs
+          WHERE user_id = $1
+          AND punch_time = $2
+          `,
+          [userId, log.timestamp]
+        );
 
-        if (exists.recordset.length === 0) {
+        if (exists.rows.length === 0) {
 
-          await pool.request()
-
-            .input("user_id", sql.VarChar(50), userId)
-            .input("punch_time", sql.DateTime, log.timestamp)
-
-            .query(`
-              INSERT INTO attendance_logs (
-                user_id,
-                punch_time
-              )
-              VALUES (
-                @user_id,
-                @punch_time
-              )
-            `);
+          await pool.query(
+            `
+            INSERT INTO attendance_logs (
+              user_id,
+              punch_time
+            )
+            VALUES ($1,$2)
+            `,
+            [userId, log.timestamp]
+          );
         }
 
       } catch (e) {
 
-        console.log("⚠️ Attendance Error:", e.message);
+        console.log(
+          "⚠️ Attendance Error:",
+          e.message
+        );
       }
     }
 
@@ -680,12 +641,15 @@ async function syncAttendance() {
 
   } catch (err) {
 
-    console.log("❌ Attendance Sync Error:", err.message);
+    console.log(
+      "❌ Attendance Sync Error:",
+      err.message
+    );
   }
 }
 
 // ======================================================
-// MANUAL ROUTES
+// ROUTES
 // ======================================================
 app.get("/sync-attendance", async (req, res) => {
 
@@ -723,7 +687,9 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, async () => {
 
-  console.log("🚀 Server Started On Port:", PORT);
+  console.log(
+    `🚀 Server Started On Port ${PORT}`
+  );
 
   await connectDB();
 
